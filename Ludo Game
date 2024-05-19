@@ -1,0 +1,270 @@
+-- GLOBAL VARIABLES
+
+-- Game progression modes in a loop:
+-- [Not-Started] -> Waiting -> Playing -> [Someone wins or timeout] -> Waiting...
+GameMode = GameMode or "Not-Started"
+StateChangeTime = StateChangeTime or nil
+
+-- State durations (in milliseconds)
+WAIT_TIME = 2 * 60 * 1000  -- 2 minutes
+TURN_TIME = 30 * 1000  -- 30 seconds for each player's turn
+NOW = NOW or nil  -- Current time, updated on every message.
+
+-- Token information for player stakes.
+PAYMENT_TOKEN = PAYMENT_TOKEN or "CRED"  -- Token address
+
+-- Players waiting to join the next game and their payment status.
+WaitingPlayers = WaitingPlayers or {}
+-- Active players and their token states.
+ActivePlayers = ActivePlayers or {}
+-- Current player's turn
+CurrentPlayer = CurrentPlayer or nil
+-- Listeners for game events
+Listeners = Listeners or {}
+
+-- Ludo board setup
+BOARD_SIZE = 52
+HOME_POSITION = {1, 14, 27, 40}  -- Starting positions for each player
+SAFE_POSITIONS = {1, 9, 14, 22, 27, 35, 40, 48}  -- Safe positions where tokens cannot be captured
+
+-- Default player state initialization.
+function initializePlayerState()
+    return {
+        Tokens = {0, 0, 0, 0},  -- Positions of the 4 tokens, 0 means not yet on the board
+        FinishedTokens = 0  -- Number of tokens that have reached the goal
+    }
+end
+
+-- Sends a state change announcement to all registered listeners.
+-- @param event: The event type or name.
+-- @param description: Description of the event.
+function announce(event, description)
+    for _, address in pairs(Listeners) do
+        ao.send({
+            Target = address,
+            Action = "Announcement",
+            Event = event,
+            Data = description
+        })
+    end
+    return print("Announcement: " .. event .. " " .. description)
+end
+
+-- Sends a reward to a player.
+-- @param recipient: The player receiving the reward.
+-- @param qty: The quantity of the reward.
+-- @param reason: The reason for the reward.
+function sendReward(recipient, qty, reason)
+    qty = tonumber(qty)
+    ao.send({
+        Target = PAYMENT_TOKEN,
+        Action = "Transfer",
+        Quantity = tostring(qty),
+        Recipient = recipient,
+        Reason = reason
+    })
+    return print("Sent Reward: " .. tostring(qty) .. " tokens to " .. recipient .. " " .. reason)
+end
+
+-- Starts the waiting period for players to become ready to play.
+function startWaitingPeriod()
+    GameMode = "Waiting"
+    StateChangeTime = NOW + WAIT_TIME
+    announce("Started-Waiting-Period", "The game is about to begin! Send your token to take part.")
+    print('Starting Waiting Period')
+end
+
+-- Starts the game if there are enough players.
+function startGamePeriod()
+    local paidPlayers = 0
+    for player, hasPaid in pairs(WaitingPlayers) do
+        if hasPaid then
+            paidPlayers = paidPlayers + 1
+        end
+    end
+
+    if paidPlayers < 2 then
+        announce("Not-Enough-Players", "Not enough players registered! Restarting...")
+        for player, hasPaid in pairs(WaitingPlayers) do
+            if hasPaid then
+                WaitingPlayers[player] = false
+                sendReward(player, 1, "Refund")
+            end
+        end
+        startWaitingPeriod()
+        return
+    end
+
+    GameMode = "Playing"
+    StateChangeTime = NOW + TURN_TIME
+    local activePlayerList = {}
+    for player, hasPaid in pairs(WaitingPlayers) do
+        if hasPaid then
+            ActivePlayers[player] = initializePlayerState()
+            table.insert(activePlayerList, player)
+        else
+            ao.send({
+                Target = player,
+                Action = "Ejected",
+                Reason = "Did-Not-Pay"
+            })
+            removeListener(player) -- Removing player from listener if they didn't pay
+        end
+    end
+    CurrentPlayer = activePlayerList[1]
+    announce("Started-Game", "The Ludo game has started. Good luck!")
+    print("Game Started....")
+end
+
+-- Ends the current game and starts a new one.
+function endGame()
+    print("Game Over")
+
+    local winner = ""
+    local maxFinishedTokens = 0
+
+    for player, state in pairs(ActivePlayers) do
+        if state.FinishedTokens > maxFinishedTokens then
+            winner = player
+            maxFinishedTokens = state.FinishedTokens
+        end
+    end
+
+    sendReward(winner, 1 * (#ActivePlayers - 1), "Win")
+
+    ActivePlayers = {}
+    announce("Game-Ended", "Congratulations! The game has ended. Winner: " .. winner .. ".")
+    startWaitingPeriod()
+end
+
+-- Removes a listener from the listeners' list.
+-- @param listener: The listener to be removed.
+function removeListener(listener)
+    for i, v in ipairs(Listeners) do
+        if v == listener then
+            table.remove(Listeners, i)
+            break
+        end
+    end
+end
+
+-- Rolls a dice and returns a number between 1 and 6.
+function rollDice()
+    return math.random(1, 6)
+end
+
+-- Moves a token based on the dice roll.
+function moveToken(player, tokenIndex, diceValue)
+    local playerState = ActivePlayers[player]
+    local tokenPosition = playerState.Tokens[tokenIndex]
+
+    -- If the token is not yet on the board and dice value is 6, bring it on the board.
+    if tokenPosition == 0 and diceValue == 6 then
+        playerState.Tokens[tokenIndex] = HOME_POSITION[1]  -- Change 1 to the appropriate index for the player
+    elseif tokenPosition > 0 then
+        local newPosition = (tokenPosition + diceValue) % BOARD_SIZE
+        playerState.Tokens[tokenIndex] = newPosition
+
+        -- Check for finishing token
+        if newPosition == 0 then
+            playerState.FinishedTokens = playerState.FinishedTokens + 1
+            playerState.Tokens[tokenIndex] = -1  -- Mark as finished
+        end
+    end
+end
+
+-- Handles the end of a turn.
+function endTurn()
+    local playerList = {}
+    for player, _ in pairs(ActivePlayers) do
+        table.insert(playerList, player)
+    end
+    local currentIndex = table.find(playerList, CurrentPlayer)
+    if currentIndex then
+        CurrentPlayer = playerList[(currentIndex % #playerList) + 1]
+    else
+        CurrentPlayer = playerList[1]
+    end
+    StateChangeTime = NOW + TURN_TIME
+    announce("Next-Turn", "It's now " .. CurrentPlayer .. "'s turn.")
+end
+
+-- HANDLERS: Game state management
+
+-- Handler for cron messages, manages game state transitions.
+Handlers.add(
+    "Game-State-Timers",
+    function(Msg)
+        return "continue"
+    end,
+    function(Msg)
+        NOW = Msg.Timestamp
+        if GameMode == "Not-Started" then
+            startWaitingPeriod()
+        elseif GameMode == "Waiting" then
+            if NOW > StateChangeTime then
+                startGamePeriod()
+            end
+        elseif GameMode == "Playing" then
+            if NOW > StateChangeTime then
+                endTurn()
+            end
+        end
+    end
+)
+
+-- Handler for player deposits to participate in the game.
+Handlers.add(
+    "Transfer",
+    function(Msg)
+        return Msg.Action == "Credit-Notice" and
+               Msg.From == PAYMENT_TOKEN and
+               tonumber(Msg.Quantity) >= 1 and
+               "continue"
+    end,
+    function(Msg)
+        WaitingPlayers[Msg.Sender] = true
+        ao.send({
+            Target = Msg.Sender,
+            Action = "Payment-Received"
+        })
+        announce("Player-Ready", Msg.Sender .. " is ready to play!")
+    end
+)
+
+-- Registers new players for the game and subscribes them for event info.
+Handlers.add(
+    "Register",
+    Handlers.utils.hasMatchingTag("Action", "Register"),
+    function(Msg)
+        if Msg.Mode ~= "Listen" and WaitingPlayers[Msg.From] == nil then
+            WaitingPlayers[Msg.From] = false
+        end
+        removeListener(Msg.From)
+        table.insert(Listeners, Msg.From)
+        ao.send({
+            Target = Msg.From,
+            Action = "Registered"
+        })
+        announce("New Player Registered", Msg.From .. " has joined in waiting.")
+    end
+)
+
+-- Unregisters players and stops sending them event info.
+Handlers.add(
+    "Unregister",
+    Handlers.utils.hasMatchingTag("Action", "Unregister"),
+    function(Msg)
+        removeListener(Msg.From)
+        ao.send({
+            Target = Msg.From,
+            Action = "Unregistered"
+        })
+    end
+)
+
+-- Retrieves the current game state.
+Handlers.add(
+    "GetGameState",
+    Handlers.utils.hasMatchingTag("Action", "GetGameState"),
+    function
