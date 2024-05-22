@@ -267,4 +267,48 @@ Handlers.add(
 Handlers.add(
     "GetGameState",
     Handlers.utils.hasMatchingTag("Action", "GetGameState"),
-    function
+    function(Msg)
+        ao.send({
+            Target = Msg.From,
+            Action = "GameState",
+            Data = {
+                GameMode = GameMode,
+                StateChangeTime = StateChangeTime,
+                WaitingPlayers = WaitingPlayers,
+                ActivePlayers = ActivePlayers,
+                CurrentPlayer = CurrentPlayer,
+                Listeners = Listeners
+            }
+        })
+    end
+)
+
+-- Rolls the dice for the current player and moves the token.
+Handlers.add(
+    "RollDice",
+    function(Msg)
+        return Msg.Action == "RollDice" and Msg.From == CurrentPlayer and GameMode == "Playing" and "continue"
+    end,
+    function(Msg)
+        local diceValue = rollDice()
+        local tokenIndex = tonumber(Msg.TokenIndex)
+        if ActivePlayers[CurrentPlayer] and ActivePlayers[CurrentPlayer].Tokens[tokenIndex] ~= nil then
+            moveToken(CurrentPlayer, tokenIndex, diceValue)
+            announce("Dice-Rolled", CurrentPlayer .. " rolled a " .. diceValue)
+            announce("Token-Moved", CurrentPlayer .. "'s token " .. tokenIndex .. " moved to " .. ActivePlayers[CurrentPlayer].Tokens[tokenIndex])
+        else
+            ao.send({
+                Target = Msg.From,
+                Action = "InvalidMove",
+                Reason = "Invalid token index"
+            })
+        end
+
+        -- Check if the game is over
+        if ActivePlayers[CurrentPlayer].FinishedTokens == 4 then
+            endGame()
+        else
+            endTurn()
+        end
+    end
+)
