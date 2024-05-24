@@ -11,8 +11,7 @@ TURN_TIME = 30 * 1000  -- 30 seconds for each player's turn
 NOW = NOW or nil  -- Current time, updated on every message.
 
 -- Token information for player stakes.
-PAYMENT_TOKEN = PAYMENT_TOKEN or "CRED"  -- Token address
-
+PAYMENT_TOKEN = "WRP0EbwUucDfoc-2l0fWsxu024Y3vmnn4p5O4ZLMTMs"
 -- Players waiting to join the next game and their payment status.
 WaitingPlayers = WaitingPlayers or {}
 -- Active players and their token states.
@@ -212,6 +211,32 @@ Handlers.add(
         end
     end
 )
+
+-- Handles the end of a turn.
+function endTurn()
+    local playerList = {}
+    for player, _ in pairs(ActivePlayers) do
+        table.insert(playerList, player)
+    end
+    
+    local currentIndex = nil
+    for i, player in ipairs(playerList) do
+        if player == CurrentPlayer then
+            currentIndex = i
+            break
+        end
+    end
+    
+    if currentIndex then
+        CurrentPlayer = playerList[(currentIndex % #playerList) + 1]
+    else
+        CurrentPlayer = playerList[1]
+    end
+    
+    StateChangeTime = NOW + TURN_TIME
+    announce("Next-Turn", "It's now " .. CurrentPlayer .. "'s turn.")
+end
+
 
 -- Handler for player deposits to participate in the game.
 Handlers.add(
